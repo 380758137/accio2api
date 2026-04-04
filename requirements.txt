@@ -1,0 +1,5 @@
+fastapi==0.119.0
+uvicorn[standard]==0.32.1
+httpx==0.28.1
+pydantic==2.11.9
+browser-cookie3==0.20.1
