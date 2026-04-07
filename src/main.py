@@ -12,11 +12,13 @@ from .config import settings
 from .models import AskStreamRequest, ChatPrepareRequest, MtopRequest
 from .services.cookie_service import CookieService
 from .services.mtop_service import MtopService
+from .services.openai_service import OpenAIService
 from .services.stream_service import StreamService
 
 cookie_service = CookieService(settings)
 mtop_service = MtopService(settings, cookie_service)
 stream_service = StreamService(settings, cookie_service)
+openai_service = OpenAIService(stream_service, cookie_service)
 
 app = FastAPI(
     title="Accio2API",
@@ -154,3 +156,92 @@ async def chat_stream(
         stream_service.proxy_stream(stream_request, cookie_header),
         media_type="text/event-stream",
     )
+
+
+# ---- Claude Code / OpenAI 兼容接口 ----
+
+
+@app.head("/")
+@app.head("/v1")
+@app.get("/v1")
+async def head_v1() -> dict[str, Any]:
+    """Claude Code 连通性检查。作者：liusheng，时间：2026-04-07"""
+    return {"ok": True}
+
+
+@app.get("/v1/models")
+async def list_models() -> dict[str, Any]:
+    """返回可用模型列表（OpenAI 兼容）。作者：liusheng，时间：2026-04-07"""
+
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "accio",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "accio2api",
+            },
+        ],
+    }
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(
+    request: dict[str, Any],
+    x_api_key: Annotated[str | None, Header(alias="x-api-key")] = None,
+    x_accio_cookie: Annotated[str | None, Header(alias="x-accio-cookie")] = None,
+    x_accio_browser: Annotated[str | None, Header(alias="x-accio-browser")] = None,
+) -> Any:
+    """Anthropic Messages API 兼容接口。作者：liusheng，时间：2026-04-07"""
+
+    messages = request.get("messages", [])
+    system = request.get("system")
+    if system:
+        if isinstance(system, str):
+            messages = [{"role": "system", "content": system}] + messages
+        elif isinstance(system, list):
+            sys_text = "\n".join(b.get("text", "") for b in system if isinstance(b, dict) and b.get("type") == "text")
+            if sys_text:
+                messages = [{"role": "system", "content": sys_text}] + messages
+    model = request.get("model", "accio")
+    stream = request.get("stream", False)
+    print(f"[ACCIO] messages count={len(messages)}, last_user={[m for m in messages if m.get('role')=='user'][-1:] if messages else []}", flush=True)
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages 不能为空")
+
+    cookie_header = resolve_cookie_or_raise(None, x_accio_cookie, x_accio_browser)
+
+    if stream:
+        return StreamingResponse(
+            openai_service.anthropic_stream(messages, model, cookie_header),
+            media_type="text/event-stream",
+        )
+    return await openai_service.anthropic_non_stream(messages, model, cookie_header)
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(
+    request: dict[str, Any],
+    authorization: Annotated[str | None, Header()] = None,
+    x_accio_cookie: Annotated[str | None, Header(alias="x-accio-cookie")] = None,
+    x_accio_browser: Annotated[str | None, Header(alias="x-accio-browser")] = None,
+) -> Any:
+    """OpenAI 兼容的 chat completions 接口。作者：liusheng，时间：2026-04-07"""
+
+    messages = request.get("messages", [])
+    model = request.get("model", "accio")
+    stream = request.get("stream", False)
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages 不能为空")
+
+    cookie_header = resolve_cookie_or_raise(None, x_accio_cookie, x_accio_browser)
+
+    if stream:
+        return StreamingResponse(
+            openai_service.chat_completions_stream(messages, model, cookie_header),
+            media_type="text/event-stream",
+        )
+    return await openai_service.chat_completions(messages, model, cookie_header)
